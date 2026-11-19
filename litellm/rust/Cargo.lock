@@ -4716,6 +4716,7 @@ dependencies = [
  "litellm-auth-types",
  "litellm-error",
  "litellm-http",
+ "litellm-model-catalog",
  "litellm-s3",
  "litellm-secret-value",
  "percent-encoding",
