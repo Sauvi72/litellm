@@ -1,7 +1,7 @@
 // Shared across integration-test targets; each target uses a different subset.
 #![allow(dead_code)]
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     Router,
@@ -20,6 +20,7 @@ use litellm_gateway_auth_core::Caller;
 use litellm_gateway_inference::{RouterTiers, RoutingCache, router};
 use litellm_http::{HttpClientPool, HttpSettings, Resolution, media::PublicDnsResolver};
 use litellm_inference::resources::CoreResources;
+use litellm_model_catalog::{CostMap, IntegrityLimits};
 use litellm_secret_value::SecretValue;
 use litellm_secrets::source::SecretSource;
 
@@ -53,28 +54,34 @@ pub fn app_with_cache(
 }
 
 pub fn app_with_litellm_params(model: &str, api_base: &str, litellm_params: Value) -> Router {
-    app_with_shaping(
-        model,
-        api_base,
-        litellm_params,
-        Value::Object(Default::default()),
-    )
+    app_and_gateway(model, api_base, litellm_params).0
 }
 
-pub fn app_with_shaping(
+/// The app with the gateway it serves from, for a test that installs a cost map.
+pub fn app_and_gateway(
     model: &str,
     api_base: &str,
     litellm_params: Value,
-    shaping: Value,
-) -> Router {
-    deployment_app(
+) -> (Router, Arc<Gateway>) {
+    let gateway = Arc::new(hosted_gateway(
         test_params(model, api_base)
             .into_iter()
             .chain(litellm_params.as_object().cloned().unwrap_or_default())
             .collect(),
-        shaping,
         None,
+        NativeHost::default(),
+    ));
+    (mounted(gateway.clone()), gateway)
+}
+
+/// The cost map whose document is `rows`.
+pub fn cost_map(rows: Value) -> CostMap {
+    CostMap::read(
+        rows.to_string().as_bytes(),
+        None,
+        IntegrityLimits::UNCHECKED,
     )
+    .unwrap()
 }
 
 /// The app with `callbacks` run around each call, in the order given.
@@ -83,14 +90,13 @@ pub fn app_with_callbacks(
     api_base: &str,
     callbacks: Vec<Arc<dyn ErasedCallback>>,
 ) -> Router {
-    hosted_app(
+    mounted(Arc::new(hosted_gateway(
         test_params(model, api_base),
-        Value::Object(Map::new()),
         None,
         NativeHost::new(Arc::new(
             Callbacks::new(callbacks.into_iter().map(Into::into).collect()).unwrap(),
         )),
-    )
+    )))
 }
 
 fn test_params(model: &str, api_base: &str) -> Map<String, Value> {
@@ -105,27 +111,22 @@ fn configured_app(
     api_base: &str,
     cache: Option<Arc<dyn litellm_cache_response::ResponseCacheService>>,
 ) -> Router {
-    deployment_app(
+    mounted(Arc::new(hosted_gateway(
         test_params(model, api_base),
-        Value::Object(Map::new()),
         cache,
-    )
+        NativeHost::default(),
+    )))
 }
 
-fn deployment_app(
-    litellm_params: Map<String, Value>,
-    shaping: Value,
-    cache: Option<Arc<dyn litellm_cache_response::ResponseCacheService>>,
-) -> Router {
-    hosted_app(litellm_params, shaping, cache, NativeHost::default())
+fn mounted(gateway: Arc<Gateway>) -> Router {
+    router(gateway).layer(axum::middleware::from_fn(as_the_master_key))
 }
 
-fn hosted_app(
+fn hosted_gateway(
     litellm_params: Map<String, Value>,
-    shaping: Value,
     cache: Option<Arc<dyn litellm_cache_response::ResponseCacheService>>,
     host: NativeHost,
-) -> Router {
+) -> Gateway {
     let pool = Arc::new(HttpClientPool::new(Arc::new(PublicDnsResolver)));
     let http = Resolution::from(&HttpSettings::default()).config;
     let secrets = Arc::new(NoSecrets);
@@ -143,24 +144,20 @@ fn hosted_app(
         dynamic,
     )
     .unwrap();
-    let id = models.registry().group("public/model").unwrap()[0]
-        .id
-        .clone();
     let gateway = Gateway::new(
         resources,
         http,
         secrets,
         models,
-        HashMap::from([(id, serde_json::from_value(shaping).unwrap())]),
+        false,
         RoutingCache::new(None, RouterTiers::default()),
         host,
     )
     .unwrap();
-    let gateway = match cache {
+    match cache {
         Some(cache) => gateway.with_cache(cache),
         None => gateway,
-    };
-    router(Arc::new(gateway)).layer(axum::middleware::from_fn(as_the_master_key))
+    }
 }
 
 async fn as_the_master_key(

@@ -41,7 +41,6 @@ use litellm_http::{
     ClientVariant, HttpClientPool, HttpSettings, HttpSettingsLayer, Resolution,
     media::PublicDnsResolver,
 };
-use litellm_model_catalog::{BUNDLED_REGISTRY, Catalog};
 use litellm_redis_store::{Remote, active_teams::ActiveTeams};
 use litellm_secrets::{OidcResolver, SecretManagerState, SecretResolver};
 
@@ -88,8 +87,7 @@ pub async fn build_inference(
     routing: RoutingCache,
     redis: &RedisClients,
 ) -> Result<Inference, Error> {
-    let catalog = Catalog::parse(BUNDLED_REGISTRY)?.value;
-    let (router, shaping) = boot::router(config, &catalog).await?;
+    let router = boot::router(config).await?;
     let limits = parallel_request_limiter::Settings::read(config, environment);
     let counters = parallel_request_limiter::counters(redis.coordination.clone());
     let key_limiter = KeyLimiter::new(limits, counters.clone(), router.clone());
@@ -113,7 +111,7 @@ pub async fn build_inference(
         resources.http.clone(),
         resources.secrets.clone(),
         router,
-        shaping,
+        config.litellm_settings.drop_params == Some(true),
         routing,
         host::NativeHost::new(Arc::new(callbacks)),
     )?;
