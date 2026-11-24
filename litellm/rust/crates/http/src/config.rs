@@ -208,15 +208,16 @@ mod tests {
     }
 
     #[cfg(feature = "fips")]
-    #[test]
-    fn fips_build_reports_x25519_as_not_approved() {
+    #[rstest]
+    #[case::x25519("X25519", "ssl_ecdh_curve X25519")]
+    fn fips_build_reports_an_unapproved_curve(#[case] curve: &str, #[case] reported: &str) {
         let settings = HttpSettings {
-            ssl_ecdh_curve: Some("X25519".into()),
+            ssl_ecdh_curve: Some(curve.into()),
             ..HttpSettings::default()
         };
         assert_eq!(
             Resolution::from(&settings).unsupported,
-            [Unsupported::NotFipsApproved("ssl_ecdh_curve X25519".into())]
+            [Unsupported::NotFipsApproved(reported.into())]
         );
     }
 

@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[cfg(feature = "fips")]
-    #[test]
+    #[rstest]
     fn fips_build_builds_a_fips_client_config() {
         let tls = ClientConfig::try_from(&config(HttpSettings::default())).unwrap();
         assert!(tls.fips());
