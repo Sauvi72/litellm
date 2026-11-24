@@ -9,7 +9,10 @@ use crate::{
     phases::ConnectBound,
     proxy::EnvironmentProxies,
     settings::{HttpSettings, SslVerify, TcpKeepalive},
-    tls::{CipherSelection, KeyExchangeGroup, Tls12CipherSuite, Unsupported, without_chacha20},
+    tls::{
+        CipherSelection, KeyExchangeGroup, Tls12CipherSuite, Unsupported, unapproved,
+        without_chacha20,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -72,29 +75,35 @@ impl From<&HttpSettings> for Resolution {
             .as_deref()
             .map(CipherSelection::from)
             .unwrap_or_default();
-        Self {
-            config: HttpClientConfig {
-                verify: Verify::from(settings),
-                client_certificate: settings.ssl_certificate.clone().map(ClientIdentity::Pem),
-                key_exchange_group: curve.clone().ok().flatten(),
-                tls12_cipher_suites: if settings.chacha20_excluded {
-                    Some(without_chacha20(ciphers.tls12_cipher_suites))
-                } else {
-                    ciphers.tls12_cipher_suites
-                },
-                force_ipv4: settings.force_ipv4,
-                http2: settings.http2,
-                user_agent: settings.user_agent.clone(),
-                proxies: if settings.trust_proxy_env {
-                    settings.proxies.clone()
-                } else {
-                    EnvironmentProxies::default()
-                },
-                connect_timeout: settings.connect_timeout,
-                tcp_keepalive: settings.tcp_keepalive,
-                pool_idle_timeout: settings.pool_idle_timeout,
+        let config = HttpClientConfig {
+            verify: Verify::from(settings),
+            client_certificate: settings.ssl_certificate.clone().map(ClientIdentity::Pem),
+            key_exchange_group: curve.clone().ok().flatten(),
+            tls12_cipher_suites: if settings.chacha20_excluded {
+                Some(without_chacha20(ciphers.tls12_cipher_suites))
+            } else {
+                ciphers.tls12_cipher_suites
             },
-            unsupported: curve.err().into_iter().chain(ciphers.unsupported).collect(),
+            force_ipv4: settings.force_ipv4,
+            http2: settings.http2,
+            user_agent: settings.user_agent.clone(),
+            proxies: if settings.trust_proxy_env {
+                settings.proxies.clone()
+            } else {
+                EnvironmentProxies::default()
+            },
+            connect_timeout: settings.connect_timeout,
+            tcp_keepalive: settings.tcp_keepalive,
+            pool_idle_timeout: settings.pool_idle_timeout,
+        };
+        Self {
+            unsupported: curve
+                .err()
+                .into_iter()
+                .chain(ciphers.unsupported)
+                .chain(unapproved(&config))
+                .collect(),
+            config,
         }
     }
 }
@@ -179,7 +188,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case::x25519("X25519", Some(KeyExchangeGroup::X25519))]
+    #[cfg_attr(
+        not(feature = "fips"),
+        case::x25519("X25519", Some(KeyExchangeGroup::X25519))
+    )]
     #[case::openssl_p256("prime256v1", Some(KeyExchangeGroup::Secp256r1))]
     #[case::p384("secp384r1", Some(KeyExchangeGroup::Secp384r1))]
     fn ecdh_curve_selects_the_single_key_exchange_group(
@@ -193,6 +205,19 @@ mod tests {
         let resolution = Resolution::from(&settings);
         assert_eq!(resolution.config.key_exchange_group, expected);
         assert_eq!(resolution.unsupported, []);
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn fips_build_reports_x25519_as_not_approved() {
+        let settings = HttpSettings {
+            ssl_ecdh_curve: Some("X25519".into()),
+            ..HttpSettings::default()
+        };
+        assert_eq!(
+            Resolution::from(&settings).unsupported,
+            [Unsupported::NotFipsApproved("ssl_ecdh_curve X25519".into())]
+        );
     }
 
     #[rstest]
